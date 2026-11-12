@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}训练期标准化{% endblock %}
+{% block body %}
+
+<div class="card">
+  <h2>当前生效参数</h2>
+  {% if active and not active.error %}
+    <p class="hint">参数 ID：<code>{{ active.param_job[:12] }}</code>
+      · 生效时间 {{ active.created_at[:19].replace('T',' ') }} UTC</p>
+    <table>
+      <tr><th>格网</th><td>{{ active.lat_count }} 纬度 × {{ active.lon_count }} 经度</td></tr>
+      <tr><th>有效格点</th><td>{{ active.valid_cells }}</td></tr>
+      <tr><th>无有效训练值（输出缺测）</th><td>{{ active.no_training_cells }}</td></tr>
+      <tr><th>标准差为 0（输出缺测）</th><td>{{ active.zero_std_cells }}</td></tr>
+      <tr><th>训练作业</th><td>{{ active.training_jobs or '—' }}</td></tr>
+      <tr><th>训练时次</th><td>{{ active.time_records or '—' }}</td></tr>
+    </table>
+  {% elif active and active.error %}
+    <p class="err">{{ active.error }}</p>
+  {% else %}
+    <p class="hint">尚无生效参数。请选择训练数据并重算。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>1. 重算训练期参数</h2>
+  <p class="hint">从<b>已成功</b>的提取作业中选择训练数据，后台按逐格均值与总体标准差
+    （ddof=0，忽略缺测）计算。重算期间旧参数仍可继续用于转换；重算成功后才原子切换。
+    同一时间只允许一次参数重算。</p>
+  {% if recomputing %}
+    <p class="hint" style="color:#9a6700">已有参数重算正在排队或运行，请稍候。</p>
+  {% endif %}
+  {% if succeeded %}
+  <form method="post" action="{{ url_for('create_parameters') }}">
+    <table>
+      <thead><tr><th></th><th>成功作业</th><th>完成时次</th><th>创建时间 (UTC)</th></tr></thead>
+      <tbody>
+      {% for j in succeeded %}
+        <tr>
+          <td><input type="checkbox" name="training_job" value="{{ j.id }}"
+              {% if loop.index == 1 %}checked{% endif %}></td>
+          <td>{{ job_label(j) }}</td>
+          <td>{{ j.total }}</td>
+          <td>{{ j.created_at[:19].replace('T',' ') }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <button type="submit" {% if recomputing %}disabled{% endif %}>重算参数</button>
+  </form>
+  {% else %}
+    <p class="hint">暂无已成功的提取作业。请先在<a href="{{ url_for('index') }}">首页</a>提交并完成一次提取。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>2. 选择目标作业并生成标准化数据</h2>
+  <p class="hint">按 <code>(温度 − 均值) / 标准差</code> 生成浮点 NetCDF，保留目标时空坐标。
+    无有效训练值或标准差为 0 的格点写为缺测；目标格网与参数格网不一致则拒绝。
+    每次转换固定使用发起时的整套参数。</p>
+  {% if active and succeeded %}
+  <form method="post" action="{{ url_for('create_normalization') }}">
+    <label for="target_job">目标作业（已成功的提取结果）</label>
+    <select id="target_job" name="target_job" required>
+      {% for j in succeeded %}
+      <option value="{{ j.id }}">{{ job_label(j) }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">生成标准化 NetCDF</button>
+  </form>
+  {% else %}
+    <p class="hint">
+      {% if not active %}需要先有生效参数。{% endif %}
+      {% if not succeeded %}需要至少一个已成功的提取作业。{% endif %}
+    </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>参数重算记录</h2>
+  {% if param_jobs %}
+  <table>
+    <thead><tr><th>参数 ID</th><th>状态</th><th>进度</th><th>创建时间 (UTC)</th><th></th></tr></thead>
+    <tbody>
+    {% for p in param_jobs %}
+      <tr>
+        <td><code>{{ p.id[:12] }}</code>
+          {% if active and active.param_job == p.id %}<span class="badge SUCCEEDED">当前</span>{% endif %}</td>
+        <td><span class="badge {{ p.status }}">{{ p.status }}</span></td>
+        <td>{{ p.progress }}/{{ p.total }}</td>
+        <td>{{ p.created_at[:19].replace('T',' ') }}</td>
+        <td><a href="{{ url_for('param_detail', job_id=p.id) }}">详情</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">暂无参数重算记录。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>标准化结果</h2>
+  {% if norm_jobs %}
+  <table>
+    <thead><tr><th>转换 ID</th><th>状态</th><th>目标作业</th><th>使用参数</th><th>进度</th><th></th></tr></thead>
+    <tbody>
+    {% for n in norm_jobs %}
+      <tr>
+        <td><code>{{ n.id[:12] }}</code></td>
+        <td><span class="badge {{ n.status }}">{{ n.status }}</span></td>
+        <td><code>{{ n.target_job[:8] }}</code></td>
+        <td><code>{{ (n.param_job or '—')[:8] }}</code></td>
+        <td>{{ n.progress }}/{{ n.total }}</td>
+        <td><a href="{{ url_for('norm_detail', job_id=n.id) }}">详情</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">暂无标准化结果。</p>
+  {% endif %}
+</div>
+
+<p><a href="{{ url_for('index') }}">← 返回提取首页</a></p>
+{% endblock %}

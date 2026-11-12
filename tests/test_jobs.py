@@ -29,7 +29,8 @@ class JobLayerTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
-        shutil.rmtree(_TMP_HOME, ignore_errors=True)
+        # The shared DATA_HOME may still be used by later test modules in the
+        # same discover process; leave its cleanup to the last module.
 
     def _wait(self, job_id, timeout=30):
         deadline = time.time() + timeout

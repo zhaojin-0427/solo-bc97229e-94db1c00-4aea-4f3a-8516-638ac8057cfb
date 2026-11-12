@@ -1,7 +1,9 @@
 """Flask web entry point: upload daily NetCDF archives, define a subset
-selection, poll job status, and download the single merged NetCDF result."""
+selection, poll job status, and download the single merged NetCDF result.
+Also hosts the training-period standardization pages."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
@@ -13,6 +15,7 @@ from flask import (Flask, abort, jsonify, redirect, render_template, request,
 from werkzeug.utils import secure_filename
 
 from . import config, jobs
+from .standardize import StandardizationError
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = config.MAX_CONTENT_LENGTH
@@ -131,7 +134,9 @@ def api_job(job_id: str):
         "total": job["total"],
         "error": job["error"],
         "download": (url_for("download", job_id=job["id"])
-                     if job["status"] == "SUCCEEDED" else None),
+                     if job["status"] == "SUCCEEDED"
+                     and jobs.output_path_for(job["id"]) is not None
+                     else None),
     })
 
 
@@ -142,6 +147,121 @@ def download(job_id: str):
         abort(404)
     return send_file(str(p), as_attachment=True,
                      download_name=f"temperature_subset_{job_id}.nc",
+                     mimetype="application/x-netcdf")
+
+
+# ---------------------------------------------------------------------------
+# Standardization pages
+# ---------------------------------------------------------------------------
+
+def _job_label(job: dict) -> str:
+    params = job.get("params")
+    try:
+        p = json.loads(params) if isinstance(params, str) else (params or {})
+        return (f"{job['id'][:8]} · t=[{p.get('t_start')}, {p.get('t_end')}] "
+                f"lat=[{p.get('south')}, {p.get('north')}] "
+                f"lon=[{p.get('west')}, {p.get('east')}]")
+    except Exception:
+        return job["id"][:8]
+
+
+@app.route("/standardize")
+def standardize_page():
+    succeeded = jobs.list_succeeded_jobs()
+    active = jobs.active_param_summary()
+    return render_template(
+        "standardize.html",
+        succeeded=succeeded,
+        job_label=_job_label,
+        active=active,
+        param_jobs=jobs.list_param_jobs(),
+        norm_jobs=jobs.list_norm_jobs(),
+        recomputing=jobs.parameter_recompute_active(),
+    ), 200
+
+
+@app.route("/params", methods=["POST"])
+def create_parameters():
+    training = request.form.getlist("training_job")
+    if not training:
+        return render_template(
+            "error.html",
+            message="请至少选择一个已成功的提取作业作为训练数据"), 400
+    try:
+        job_id = jobs.create_param_job(training)
+    except StandardizationError as exc:
+        return render_template("error.html", message=str(exc)), 409
+    return redirect(url_for("param_detail", job_id=job_id))
+
+
+@app.route("/params/<job_id>")
+def param_detail(job_id: str):
+    job = jobs.get_param_job(job_id)
+    if not job:
+        abort(404)
+    active = jobs.get_active_parameters()
+    return render_template(
+        "param_job.html", job=job,
+        is_active=bool(active and active["param_job"] == job_id)), 200
+
+
+@app.route("/api/params/<job_id>")
+def api_param(job_id: str):
+    job = jobs.get_param_job(job_id)
+    if not job:
+        abort(404)
+    return jsonify({
+        "id": job["id"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "total": job["total"],
+        "error": job["error"],
+    })
+
+
+@app.route("/normalize", methods=["POST"])
+def create_normalization():
+    target = (request.form.get("target_job") or "").strip()
+    if not target:
+        return render_template("error.html", message="请选择目标作业"), 400
+    try:
+        job_id = jobs.create_norm_job(target)
+    except StandardizationError as exc:
+        return render_template("error.html", message=str(exc)), 409
+    return redirect(url_for("norm_detail", job_id=job_id))
+
+
+@app.route("/normalized/<job_id>")
+def norm_detail(job_id: str):
+    job = jobs.get_norm_job(job_id)
+    if not job:
+        abort(404)
+    return render_template("norm_job.html", job=job), 200
+
+
+@app.route("/api/normalized/<job_id>")
+def api_normalized(job_id: str):
+    job = jobs.get_norm_job(job_id)
+    if not job:
+        abort(404)
+    return jsonify({
+        "id": job["id"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "total": job["total"],
+        "error": job["error"],
+        "download": (url_for("download_normalized", job_id=job["id"])
+                     if job["status"] == "SUCCEEDED" else None),
+    })
+
+
+@app.route("/normalized/<job_id>/download")
+def download_normalized(job_id: str):
+    p = jobs.normalized_path_for(job_id)
+    if p is None:
+        abort(404)
+    return send_file(str(p), as_attachment=True,
+                     download_name=f"temperature_standardized_{job_id}.nc",
                      mimetype="application/x-netcdf")
 
 

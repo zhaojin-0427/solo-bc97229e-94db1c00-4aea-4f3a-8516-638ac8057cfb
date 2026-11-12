@@ -12,6 +12,12 @@ DATA_HOME = _data_home()
 UPLOAD_DIR = DATA_HOME / "uploads"
 OUTPUT_DIR = DATA_HOME / "outputs"
 TMP_DIR = DATA_HOME / "tmp"
+# Immutable per-cell statistics files (mean / population std / valid count).
+PARAM_DIR = DATA_HOME / "params"
+# Per-conversion immutable parameter snapshots.
+SNAPSHOT_DIR = DATA_HOME / "param_snapshots"
+# Standardized NetCDF results.
+NORM_OUTPUT_DIR = DATA_HOME / "normalized"
 DB_PATH = DATA_HOME / "jobs.db"
 
 # Number of time records pulled from each input file in one read.
@@ -23,8 +29,14 @@ TIME_CHUNK = int(os.environ.get("TIME_CHUNK", "64"))
 NETCDF_FORMAT = "NETCDF4"
 COMPRESSION_LEVEL = 4
 
+# Standardized outputs are floating point; use the standard NetCDF default
+# fill so missing cells are unambiguous.
+NORM_DTYPE = "f8"
+NORM_FILL = 9.9692099683868690e+36
+
 # Upload limits
 MAX_CONTENT_LENGTH = int(os.environ.get("MAX_UPLOAD_MB", "2048")) * 1024 * 1024
 
-for _d in (UPLOAD_DIR, OUTPUT_DIR, TMP_DIR):
+for _d in (UPLOAD_DIR, OUTPUT_DIR, TMP_DIR, PARAM_DIR, SNAPSHOT_DIR,
+           NORM_OUTPUT_DIR):
     _d.mkdir(parents=True, exist_ok=True)

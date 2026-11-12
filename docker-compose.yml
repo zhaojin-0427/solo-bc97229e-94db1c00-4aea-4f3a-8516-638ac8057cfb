@@ -22,7 +22,7 @@ services:
 
   # One-off job that writes the demo NetCDF files into a host-mounted folder
   # so they can be uploaded through the Web UI. Run:
-  #   docker compose run --rm samples
+  #   docker compose --profile samples run --rm samples
   samples:
     image: ocean-nc-subset:latest
     build: .

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}参数重算 {{ job.id[:8] }}{% endblock %}
+{% block body %}
+<div class="card" id="param-card" data-job-id="{{ job.id }}">
+  <h2>参数重算 <code>{{ job.id[:12] }}</code></h2>
+  <p>状态：<span class="badge {{ job.status }}" id="status">{{ job.status }}</span>
+    {% if is_active %}<span class="badge SUCCEEDED">当前生效</span>{% endif %}</p>
+  <p class="hint" id="progress-text">{{ job.progress }} / {{ job.total }} 时次（两遍统计）</p>
+  <div class="bar"><div id="bar" style="width:
+    {% if job.total %}{{ (job.progress * 100 / job.total)|round(0)|int }}%{% else %}0%{% endif %}">
+  </div></div>  <div id="error-box" style="margin-top:14px">
+    {% if job.error %}<p class="err">{{ job.error }}</p>{% endif %}
+  </div>
+  <p class="hint" style="margin-top:14px">
+    统计计算按时间分块，忽略缺测；仅当本次重算成功后才切换为当前参数。
+    失败或中断时原参数保持不变。
+  </p>
+  <p style="margin-top:18px"><a href="{{ url_for('standardize_page') }}">← 返回标准化工作台</a></p>
+</div>
+
+<script>
+(function () {
+  const card = document.getElementById('param-card');
+  const id = card.dataset.jobId;
+  const statusEl = document.getElementById('status');
+  if (['SUCCEEDED', 'FAILED'].includes(statusEl.textContent)) return;
+  const timer = setInterval(async () => {
+    const r = await fetch(`/api/params/${id}`);
+    if (!r.ok) { clearInterval(timer); return; }
+    const j = await r.json();
+    statusEl.textContent = j.status;
+    statusEl.className = 'badge ' + j.status;
+    document.getElementById('progress-text').textContent =
+      `${j.progress} / ${j.total} 时次（两遍统计）`;
+    const pct = j.total ? Math.round(j.progress * 100 / j.total) : 0;
+    document.getElementById('bar').style.width = pct + '%';
+    if (j.status === 'SUCCEEDED') {
+      clearInterval(timer);
+      window.location.reload();
+    } else if (j.status === 'FAILED') {
+      clearInterval(timer);
+      document.getElementById('error-box').innerHTML =
+        `<p class="err">${(j.error || '参数重算失败').replace(/</g,'&lt;')}</p>`;
+    }
+  }, 1000);
+})();
+</script>
+{% endblock %}

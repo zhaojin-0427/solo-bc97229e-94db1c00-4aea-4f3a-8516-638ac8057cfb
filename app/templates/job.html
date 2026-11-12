@@ -15,9 +15,11 @@
     {% if job.status == 'SUCCEEDED' %}
     <a href="{{ url_for('download', job_id=job.id) }}">
       <button type="button" style="margin:0">下载结果 NetCDF</button></a>
+    <p class="hint">该结果可作为参数重算的训练数据，也可作为标准化目标。</p>
     {% endif %}
   </div>
-  <p style="margin-top:18px"><a href="{{ url_for('index') }}">← 返回首页</a></p>
+  <p style="margin-top:18px"><a href="{{ url_for('index') }}">← 返回首页</a>
+    · <a href="{{ url_for('standardize_page') }}">标准化工作台</a></p>
 </div>
 
 <script>
@@ -38,8 +40,10 @@
     document.getElementById('bar').style.width = pct + '%';
     if (j.status === 'SUCCEEDED') {
       clearInterval(timer);
-      document.getElementById('download-box').innerHTML =
-        `<a href="${j.download}"><button type="button" style="margin:0">下载结果 NetCDF</button></a>`;
+      if (j.download) {
+        document.getElementById('download-box').innerHTML =
+          `<a href="${j.download}"><button type="button" style="margin:0">下载结果 NetCDF</button></a>`;
+      }
     } else if (j.status === 'FAILED') {
       clearInterval(timer);
       document.getElementById('error-box').innerHTML =

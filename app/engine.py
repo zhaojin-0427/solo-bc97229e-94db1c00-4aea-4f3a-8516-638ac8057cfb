@@ -18,6 +18,7 @@ Design properties
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -25,6 +26,13 @@ import netCDF4 as nc
 import numpy as np
 
 from . import config
+
+# netCDF4/HDF5 handles are not reliably thread-safe.  Worker threads (and
+# HTTP request threads validating parameters) may touch NetCDF files at the
+# same time, so every actual NetCDF call is serialized by this process-wide
+# re-entrant lock.  It is held per chunk / per metadata read, not for the
+# whole job, so independent jobs still interleave.
+NETCDF_LOCK = threading.RLock()
 
 
 class ExtractionError(Exception):
@@ -93,46 +101,88 @@ REQUIRED_DIMS = ("time", "lat", "lon")
 REQUIRED_VARS = ("time", "lat", "lon", "temperature")
 
 
-def _read_coords(path: str) -> dict:
-    with nc.Dataset(path, "r") as ds:
-        for name in REQUIRED_DIMS:
-            if name not in ds.dimensions:
-                raise ExtractionError(f"{os.path.basename(path)} 缺少维度 {name}")
-        for name in REQUIRED_VARS:
-            if name not in ds.variables:
-                raise ExtractionError(f"{os.path.basename(path)} 缺少变量 {name}")
-        t = ds.variables["time"][:]
-        lat = ds.variables["lat"][:]
-        lon = ds.variables["lon"][:]
-        temp = ds.variables["temperature"]
-        if t.ndim != 1 or lat.ndim != 1 or lon.ndim != 1:
-            raise ExtractionError(f"{os.path.basename(path)} 坐标变量必须是一维")
-        if temp.dimensions != ("time", "lat", "lon"):
-            raise ExtractionError(
-                f"{os.path.basename(path)} temperature 维度必须为 "
-                "(time, lat, lon)")
-        if t.size > 1 and np.any(np.diff(t.astype(np.int64)) <= 0):
-            raise ExtractionError(f"{os.path.basename(path)} time 必须严格递增")
-        if lat.size > 1:
-            dlat = np.diff(lat)
-            if not (np.all(dlat > 0) or np.all(dlat < 0)):
+def _read_coords(path: str, allow_converted_lon: bool = False) -> dict:
+    """Open a file once and validate its structure. The returned dict also
+    carries safe in-memory index maps:
+
+    * ``canonical_lat_idx`` maps ascending sorted latitude values to storage
+      positions, so files with reversed latitude order can be read in a
+      canonical ascending-lat order.
+    * ``lon_idx_uniq`` lists storage indices with unique longitudes.
+
+    ``allow_converted_lon`` also accepts an already converted, ascending
+    [-180, 180) longitude axis.  Only used for extraction *results*, which are
+    produced by this engine in that convention; uploads stay [0, 360).
+    """
+    with NETCDF_LOCK:
+        with nc.Dataset(path, "r") as ds:
+            for name in REQUIRED_DIMS:
+                if name not in ds.dimensions:
+                    raise ExtractionError(f"{os.path.basename(path)} 缺少维度 {name}")
+            for name in REQUIRED_VARS:
+                if name not in ds.variables:
+                    raise ExtractionError(f"{os.path.basename(path)} 缺少变量 {name}")
+            t = ds.variables["time"][:]
+            lat = ds.variables["lat"][:]
+            lon = ds.variables["lon"][:]
+            temp = ds.variables["temperature"]
+            if t.ndim != 1 or lat.ndim != 1 or lon.ndim != 1:
+                raise ExtractionError(f"{os.path.basename(path)} 坐标变量必须是一维")
+            if temp.dimensions != ("time", "lat", "lon"):
                 raise ExtractionError(
-                    f"{os.path.basename(path)} lat 必须严格单调")
-        if np.any(lon < 0.0) or np.any(lon >= 360.0):
-            raise ExtractionError(f"{os.path.basename(path)} lon 必须位于 [0,360)")
-        if lon.size > 1 and np.any(np.diff(lon) <= 0):
-            raise ExtractionError(f"{os.path.basename(path)} lon 必须严格递增")
-        fill = getattr(temp, "_FillValue", None)
-        if fill is None:
-            fill = getattr(temp, "missing_value", None)
+                    f"{os.path.basename(path)} temperature 维度必须为 "
+                    "(time, lat, lon)")
+            if t.size > 1 and np.any(np.diff(t.astype(np.int64)) <= 0):
+                raise ExtractionError(f"{os.path.basename(path)} time 必须严格递增")
+            if lat.size > 1:
+                dlat = np.diff(lat)
+                if not (np.all(dlat > 0) or np.all(dlat < 0)):
+                    raise ExtractionError(
+                        f"{os.path.basename(path)} lat 必须严格单调")
+            if not allow_converted_lon:
+                if np.any(lon < 0.0) or np.any(lon >= 360.0):
+                    raise ExtractionError(f"{os.path.basename(path)} lon 必须位于 [0,360)")
+            else:
+                in_0360 = bool(np.all((lon >= 0.0) & (lon < 360.0)))
+                in_180 = bool(np.all((lon >= -180.0) & (lon < 180.0)))
+                if not (in_0360 or in_180):
+                    raise ExtractionError(
+                        f"{os.path.basename(path)} lon 必须位于 [-180,180) 或 [0,360)")
+            if lon.size > 1 and np.any(np.diff(lon) <= 0):
+                raise ExtractionError(f"{os.path.basename(path)} lon 必须严格递增")
+            fill = getattr(temp, "_FillValue", None)
+            if fill is None:
+                fill = getattr(temp, "missing_value", None)
+            lat_sorted = np.sort(lat)
+            if lat_sorted.size > 1 and np.any(np.diff(lat_sorted) <= 0):
+                raise ExtractionError(
+                    f"{os.path.basename(path)} 纬度格点存在重复值")
+            pos = {float(v): i for i, v in enumerate(lat)}
+            canonical_lat_idx = np.array(
+                [pos[float(v)] for v in lat_sorted], dtype=np.int64)
+            lon_idx_uniq = np.arange(lon.size, dtype=np.int64)
+            if lon.size > 1:
+                uniq = np.diff(lon) > 0
+                if not np.all(uniq):
+                    keep = np.concatenate(([True], uniq))
+                    lon_idx_uniq = np.flatnonzero(keep).astype(np.int64)
         return {
             "path": path,
             "time": np.array(t, dtype=np.int64),
             "lat": np.array(lat, dtype=np.float64),
             "lon": np.array(lon, dtype=np.float64),
+            "lat_sorted": lat_sorted,
+            "canonical_lat_idx": canonical_lat_idx,
+            "lon_idx_uniq": lon_idx_uniq,
             "dtype": temp.dtype,
             "fill": np.array(fill, dtype=temp.dtype) if fill is not None else None,
         }
+
+
+def read_file_meta(path: str, allow_converted_lon: bool = False) -> dict:
+    """Public, cheap structural probe for a single archive (used by the
+    standardization layer). Returns the validated metadata dict."""
+    return _read_coords(path, allow_converted_lon=allow_converted_lon)
 
 
 @dataclass
@@ -232,13 +282,15 @@ class FileStream:
         self._cursor = 0
 
     def __enter__(self) -> "FileStream":
-        self._ds = nc.Dataset(self.path, "r")
+        with NETCDF_LOCK:
+            self._ds = nc.Dataset(self.path, "r")
         return self
 
     def __exit__(self, *exc) -> None:
-        if self._ds is not None:
-            self._ds.close()
-            self._ds = None
+        with NETCDF_LOCK:
+            if self._ds is not None:
+                self._ds.close()
+                self._ds = None
 
     def next_slab(self) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         if self._cursor >= self.time_idx.size:
@@ -247,15 +299,16 @@ class FileStream:
         idx = self.time_idx[self._cursor:end]
         self._cursor = end
 
-        tvar = self._ds.variables["time"]
-        tval = np.array(tvar[idx], dtype=np.int64)
-        temp = self._ds.variables["temperature"]
-        # netCDF4 accepts a 1-D integer array index on the time dimension.
-        # The lat/lon reordering then runs on the in-memory NumPy array with
-        # np.ix_ (open mesh), which keeps the two axes independent — chained
-        # fancy indexing alone would trigger cross-indexing and scramble
-        # grid cells.
-        raw = temp[idx, :, :]
+        with NETCDF_LOCK:
+            tvar = self._ds.variables["time"]
+            tval = np.array(tvar[idx], dtype=np.int64)
+            temp = self._ds.variables["temperature"]
+            # netCDF4 accepts a 1-D integer array index on the time dimension.
+            # The lat/lon reordering then runs on the in-memory NumPy array
+            # with np.ix_ (open mesh), which keeps the two axes independent —
+            # chained fancy indexing alone would trigger cross-indexing and
+            # scramble grid cells.
+            raw = temp[idx, :, :]
         t0, li, oi = np.ix_(np.arange(raw.shape[0]),
                             self.lat_idx, self.lon_idx)
         slab = raw[t0, li, oi]
@@ -349,35 +402,37 @@ def run_extraction(paths: Sequence[str], sel: Selection,
         for i in range(len(streams)):
             refill(i)
 
-        ds_out = nc.Dataset(tmp_path, "w", format=config.NETCDF_FORMAT)
-        ds_out.createDimension("time", None)
-        ds_out.createDimension("lat", out_lat.size)
-        ds_out.createDimension("lon", out_lon.size)
+        with NETCDF_LOCK:
+            ds_out = nc.Dataset(tmp_path, "w",
+                                format=config.NETCDF_FORMAT)
+            ds_out.createDimension("time", None)
+            ds_out.createDimension("lat", out_lat.size)
+            ds_out.createDimension("lon", out_lon.size)
 
-        v_time = ds_out.createVariable("time", "i8", ("time",))
-        v_time.units = "seconds since 1970-01-01 00:00:00 UTC"
-        v_time.calendar = "proleptic_gregorian"
-        v_time.long_name = "Unix epoch seconds"
+            v_time = ds_out.createVariable("time", "i8", ("time",))
+            v_time.units = "seconds since 1970-01-01 00:00:00 UTC"
+            v_time.calendar = "proleptic_gregorian"
+            v_time.long_name = "Unix epoch seconds"
 
-        v_lat = ds_out.createVariable("lat", "f8", ("lat",))
-        v_lat.units = "degrees_north"
-        v_lat.standard_name = "latitude"
+            v_lat = ds_out.createVariable("lat", "f8", ("lat",))
+            v_lat.units = "degrees_north"
+            v_lat.standard_name = "latitude"
 
-        v_lon = ds_out.createVariable("lon", "f8", ("lon",))
-        v_lon.units = "degrees_east"
-        v_lon.standard_name = "longitude"
-        v_lon.comment = "converted from [0,360) to [-180,180)"
+            v_lon = ds_out.createVariable("lon", "f8", ("lon",))
+            v_lon.units = "degrees_east"
+            v_lon.standard_name = "longitude"
+            v_lon.comment = "converted from [0,360) to [-180,180)"
 
-        var_kwargs = {"compression": "zlib",
-                      "complevel": config.COMPRESSION_LEVEL}
-        if fill is not None:
-            var_kwargs["fill_value"] = fill
-        v_temp = ds_out.createVariable(
-            "temperature", dtype, ("time", "lat", "lon"), **var_kwargs)
-        v_temp.long_name = "temperature"
+            var_kwargs = {"compression": "zlib",
+                          "complevel": config.COMPRESSION_LEVEL}
+            if fill is not None:
+                var_kwargs["fill_value"] = fill
+            v_temp = ds_out.createVariable(
+                "temperature", dtype, ("time", "lat", "lon"), **var_kwargs)
+            v_temp.long_name = "temperature"
 
-        v_lat[:] = out_lat
-        v_lon[:] = out_lon
+            v_lat[:] = out_lat
+            v_lon[:] = out_lon
 
         written = 0
         while True:
@@ -407,24 +462,26 @@ def run_extraction(paths: Sequence[str], sel: Selection,
                     if progress:
                         progress(done_records, total_records)
 
-            v_time[written] = t_now
-            if fill is not None:
-                out_slab = np.where(acc_mask, fill, acc_data).astype(dtype)
-                v_temp[written, :, :] = np.ma.array(
-                    out_slab, mask=acc_mask, fill_value=fill)
-            else:
-                # No declared fill: still need a mask representation; netCDF4
-                # applies a default fill value for masked entries.
-                v_temp[written, :, :] = np.ma.array(
-                    acc_data, mask=acc_mask)
+            with NETCDF_LOCK:
+                v_time[written] = t_now
+                if fill is not None:
+                    out_slab = np.where(acc_mask, fill, acc_data).astype(dtype)
+                    v_temp[written, :, :] = np.ma.array(
+                        out_slab, mask=acc_mask, fill_value=fill)
+                else:
+                    # No declared fill: still need a mask representation;
+                    # netCDF4 applies a default fill for masked entries.
+                    v_temp[written, :, :] = np.ma.array(
+                        acc_data, mask=acc_mask)
             written += 1
 
-        ds_out.sync()
-        ds_out.close()
-        ds_out = None
-        for s in streams:
-            s.__exit__(None, None, None)
-        streams.clear()
+        with NETCDF_LOCK:
+            ds_out.sync()
+            ds_out.close()
+            ds_out = None
+            for s in streams:
+                s.__exit__(None, None, None)
+            streams.clear()
 
         os.replace(tmp_path, output_path)
         return {
@@ -434,16 +491,17 @@ def run_extraction(paths: Sequence[str], sel: Selection,
             "output": output_path,
         }
     except Exception:
-        if ds_out is not None:
-            try:
-                ds_out.close()
-            except Exception:
-                pass
-        for s in streams:
-            try:
-                s.__exit__(None, None, None)
-            except Exception:
-                pass
+        with NETCDF_LOCK:
+            if ds_out is not None:
+                try:
+                    ds_out.close()
+                except Exception:
+                    pass
+            for s in streams:
+                try:
+                    s.__exit__(None, None, None)
+                except Exception:
+                    pass
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)

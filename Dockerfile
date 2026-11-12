@@ -15,7 +15,8 @@ COPY gunicorn.conf.py ./
 COPY app ./app
 COPY scripts ./scripts
 
-RUN mkdir -p /data/uploads /data/outputs /data/tmp
+RUN mkdir -p /data/uploads /data/outputs /data/tmp /data/params \
+             /data/param_snapshots /data/normalized
 VOLUME ["/data"]
 
 EXPOSE 8000
