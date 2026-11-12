@@ -1,0 +1,35 @@
+services:
+  web:
+    build: .
+    image: ocean-nc-subset:latest
+    container_name: ocean-nc-web
+    ports:
+      - "8000:8000"
+    environment:
+      DATA_HOME: /data
+      TIME_CHUNK: "64"
+      MAX_UPLOAD_MB: "2048"
+    volumes:
+      - nc_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # One-off job that writes the demo NetCDF files into a host-mounted folder
+  # so they can be uploaded through the Web UI. Run:
+  #   docker compose run --rm samples
+  samples:
+    image: ocean-nc-subset:latest
+    build: .
+    profiles: ["samples"]
+    volumes:
+      - ./samples:/samples
+    entrypoint: ["python", "-m", "scripts.make_samples", "/samples/data"]
+
+volumes:
+  nc_data:

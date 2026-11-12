@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}任务 {{ job.id[:8] }}{% endblock %}
+{% block body %}
+<div class="card" id="job-card" data-job-id="{{ job.id }}">
+  <h2>任务 <code>{{ job.id[:12] }}</code></h2>
+  <p>状态：<span class="badge {{ job.status }}" id="status">{{ job.status }}</span></p>
+  <p class="hint" id="progress-text">{{ job.progress }} / {{ job.total }} 条时间记录</p>
+  <div class="bar"><div id="bar" style="width:
+    {% if job.total %}{{ (job.progress * 100 / job.total)|round(0)|int }}%{% else %}0%{% endif %}">
+  </div></div>
+  <div id="error-box" style="margin-top:14px">
+    {% if job.error %}<p class="err">{{ job.error }}</p>{% endif %}
+  </div>
+  <div id="download-box" style="margin-top:16px">
+    {% if job.status == 'SUCCEEDED' %}
+    <a href="{{ url_for('download', job_id=job.id) }}">
+      <button type="button" style="margin:0">下载结果 NetCDF</button></a>
+    {% endif %}
+  </div>
+  <p style="margin-top:18px"><a href="{{ url_for('index') }}">← 返回首页</a></p>
+</div>
+
+<script>
+(function () {
+  const card = document.getElementById('job-card');
+  const id = card.dataset.jobId;
+  const statusEl = document.getElementById('status');
+  if (['SUCCEEDED', 'FAILED'].includes(statusEl.textContent)) return;
+  const timer = setInterval(async () => {
+    const r = await fetch(`/api/jobs/${id}`);
+    if (!r.ok) { clearInterval(timer); return; }
+    const j = await r.json();
+    statusEl.textContent = j.status;
+    statusEl.className = 'badge ' + j.status;
+    document.getElementById('progress-text').textContent =
+      `${j.progress} / ${j.total} 条时间记录`;
+    const pct = j.total ? Math.round(j.progress * 100 / j.total) : 0;
+    document.getElementById('bar').style.width = pct + '%';
+    if (j.status === 'SUCCEEDED') {
+      clearInterval(timer);
+      document.getElementById('download-box').innerHTML =
+        `<a href="${j.download}"><button type="button" style="margin:0">下载结果 NetCDF</button></a>`;
+    } else if (j.status === 'FAILED') {
+      clearInterval(timer);
+      document.getElementById('error-box').innerHTML =
+        `<p class="err">${(j.error || '任务失败').replace(/</g,'&lt;')}</p>`;
+    }
+  }, 1000);
+})();
+</script>
+{% endblock %}
